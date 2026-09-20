@@ -5,11 +5,13 @@ import os
 import re
 
 import pyphen
+from odf.draw import Frame, TextBox
 from odf.opendocument import OpenDocumentText
 from odf.style import (
     Columns,
     DropCap,
     FontFace,
+    GraphicProperties,
     MasterPage,
     PageLayout,
     PageLayoutProperties,
@@ -191,6 +193,26 @@ def book_of(title):
     return title.rsplit(" ", 1)[0]
 
 
+def chapter_of(title):
+    return int(title.rsplit(" ", 1)[1])
+
+
+_ROMAN = [
+    (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"),
+    (100, "c"), (90, "xc"), (50, "l"), (40, "xl"),
+    (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"),
+]
+
+
+def to_roman(n):
+    r = ""
+    for val, sym in _ROMAN:
+        while n >= val:
+            r += sym
+            n -= val
+    return r
+
+
 def build():
     doc = OpenDocumentText()
 
@@ -291,6 +313,35 @@ def build():
     make_dropcap_style("BookOpener", 6)
     make_dropcap_style("ChapterOpener", 3)
 
+    # Chapter number: a small text frame anchored to the paragraph, positioned
+    # "outside" (i.e., the outer margin of whichever page the chapter starts
+    # on — the outer margin flips across recto/verso for mirrored layouts, so
+    # this always lands in a page margin and never in the between-columns
+    # gutter, satisfying the "inner or outer, never between the columns" rule).
+    chnum_frame_style = Style(name="ChapNumFrame", family="graphic")
+    chnum_frame_style.addElement(
+        GraphicProperties(
+            verticalpos="from-top",
+            verticalrel="paragraph",
+            horizontalpos="from-left",
+            horizontalrel="page",
+            wrap="run-through",
+            runthrough="foreground",
+            fill="none",
+            stroke="none",
+        )
+    )
+    doc.automaticstyles.addElement(chnum_frame_style)
+
+    chnum_para_style = Style(name="ChapNumPara", family="paragraph")
+    chnum_para_style.addElement(
+        TextProperties(fontname=FONT, fontsize="20pt", color="#b22222")
+    )
+    chnum_para_style.addElement(
+        ParagraphProperties(textalign="center", lineheight="100%")
+    )
+    doc.styles.addElement(chnum_para_style)
+
     # Between-books colophon: red, centered, no dropcap.
     colophon_style = Style(name="Colophon", family="paragraph")
     colophon_style.addElement(
@@ -318,10 +369,31 @@ def build():
             head = head[0] + head[1].upper()
         return head + tail
 
-    def emit(text, style_name):
+    def emit(text, style_name, roman=None):
+        """Emit a paragraph. If roman is given, prepend a chapter-number
+        frame anchored to the paragraph (positioned outside the content area)."""
         if not text:
             return
-        doc.text.addElement(P(stylename=style_name, text=finalize(text)))
+        p = P(stylename=style_name)
+        if roman:
+            frame = Frame(
+                anchortype="paragraph",
+                width="0.9in",
+                height="0.35in",
+                # Positioned at 0.5" from the left of the page. On recto
+                # (odd) pages this is in the inner margin; on verso (even)
+                # pages this is in the outer margin. Either way it is a
+                # page margin, never the between-columns gutter.
+                x="0.5in",
+                y="0in",
+                stylename=chnum_frame_style,
+            )
+            box = TextBox()
+            box.addElement(P(stylename="ChapNumPara", text=roman))
+            frame.addElement(box)
+            p.addElement(frame)
+        p.addText(finalize(text))
+        doc.text.addElement(p)
 
     # Title page — its own leading paragraph, 6-line dropcap.
     title_page = read_preamble_text(os.path.join(SRC_DIR, "title_page.txt"))
@@ -388,7 +460,7 @@ def build():
 
         combined = " ".join(pieces)
         style_name = "BookOpener" if first_of_book else "ChapterOpener"
-        emit(combined, style_name)
+        emit(combined, style_name, roman=to_roman(chapter_of(title)))
 
     doc.save(OUT_PATH)
     print(f"Wrote {OUT_PATH}")
