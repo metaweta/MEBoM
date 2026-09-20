@@ -404,6 +404,33 @@ def build(out_path=OUT_PATH, chapter_placements=None):
     )
     doc.styles.addElement(chnum_para_style)
 
+    # Text-family span style that draws an overline. Used to render the
+    # scribal abbreviation "iblþ" — ALOT Gutenberg A has no glyphs for the
+    # precomposed macron-b or the special thorn-with-stroke (U+A765), so we
+    # add the horizontal strokes with markup on plain letters instead.
+    overline_span_style = Style(name="OverlineSpan", family="text")
+    overline_span_style.addElement(
+        TextProperties(
+            textoverlinestyle="solid",
+            textoverlinewidth="auto",
+            textoverlinecolor="font-color",
+        )
+    )
+    doc.styles.addElement(overline_span_style)
+
+    def add_body_text(p, text):
+        """Add body text to a paragraph, expanding the abbreviation 'iblþ'
+        into i + <overline>b</overline> + l + <overline>þ</overline>."""
+        parts = text.split("iblþ")
+        for i, chunk in enumerate(parts):
+            if chunk:
+                p.addText(chunk)
+            if i < len(parts) - 1:
+                p.addText("i")
+                p.addElement(Span(stylename=overline_span_style, text="b"))
+                p.addText("l")
+                p.addElement(Span(stylename=overline_span_style, text="þ"))
+
     # Text-family style for the numeral glyphs themselves. Paragraph-level
     # text-properties inside a draw:text-box aren't consistently applied by
     # LibreOffice (color/font were being ignored), so we wrap the numeral in
@@ -488,7 +515,7 @@ def build(out_path=OUT_PATH, chapter_placements=None):
             box.addElement(para)
             frame.addElement(box)
             p.addElement(frame)
-        p.addText(finalize(text))
+        add_body_text(p, finalize(text))
         doc.text.addElement(p)
 
     # Title page — its own leading paragraph, 6-line dropcap.
