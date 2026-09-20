@@ -630,41 +630,49 @@ def _strip_noise(s):
 
 def probe_chapter_columns(pdf_path):
     """Return {chapter_key -> {'column':'left'|'right', 'parity':'odd'|'even'}}
-    by looking at where each chapter's opening text starts in the rendered
-    PDF. `parity` follows PDF page numbering (1 = odd = recto)."""
+    by finding each chapter's opening text in the rendered PDF, in
+    document order — a cursor advances past each match so that chapters
+    with identical opening formulas (e.g. Mosiah 4 & 5 both begin "And
+    now, whanne kyng Beniamyn hadde …") don't collide onto the earlier
+    chapter's location. `parity` follows PDF page numbering
+    (1 = odd = recto)."""
     from pypdf import PdfReader
     entries = read_index()
     openings = [
-        (_chapter_key(fn), _strip_noise(chapter_opening_probe(fn))[:15])
+        (_chapter_key(fn), _strip_noise(chapter_opening_probe(fn))[:30])
         for fn, _ in entries
     ]
-    result = {}
     reader = PdfReader(pdf_path)
+    # Extract every non-whitespace character in reading order, tracking
+    # the page + x-coord where each landed.
+    chars, char_pg, char_x = [], [], []
     for pgnum, page in enumerate(reader.pages, start=1):
         runs = []
         def visit(text, cm, tm, font_dict, font_size):
             if text:
-                runs.append((tm[4], tm[5], text))
+                runs.append((tm[4], text))
         page.extract_text(visitor_text=visit)
-        clean_chars = []
-        clean_x = []
-        for x, _y, txt in runs:
+        for x, txt in runs:
             for ch in txt:
                 if re.match(r"[\s\-­]", ch):
                     continue
-                clean_chars.append(ch)
-                clean_x.append(x)
-        clean_text = "".join(clean_chars)
-        for key, probe in openings:
-            if key in result or not probe:
-                continue
-            idx = clean_text.find(probe)
-            if idx >= 0 and idx < len(clean_x):
-                x = clean_x[idx]
-                result[key] = {
-                    "column": "left" if x < COLUMN_SPLIT_PT else "right",
-                    "parity": "odd" if pgnum % 2 else "even",
-                }
+                chars.append(ch)
+                char_pg.append(pgnum)
+                char_x.append(x)
+    doc_text = "".join(chars)
+    result = {}
+    cursor = 0
+    for key, probe in openings:
+        if not probe:
+            continue
+        idx = doc_text.find(probe, cursor)
+        if idx < 0:
+            continue
+        result[key] = {
+            "column": "left" if char_x[idx] < COLUMN_SPLIT_PT else "right",
+            "parity": "odd" if char_pg[idx] % 2 else "even",
+        }
+        cursor = idx + len(probe)
     return result
 
 
