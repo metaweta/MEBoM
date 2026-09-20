@@ -133,6 +133,20 @@ def _rule_hyphens(word):
     return positions
 
 
+LIGATURE_PAIRS = {"ff", "fi", "fl", "ft", "ct", "ch", "ck", "tt", "tz"}
+
+
+def _is_forbidden_split(word, pos):
+    """SHY at position `pos` would land between word[pos-1] and word[pos].
+    Don't split there if the pair forms one of the font's ligatures — LO
+    otherwise fires the ligature *across* the SHY and then also on the
+    trailing portion, drawing the ligature twice."""
+    if pos <= 0 or pos >= len(word):
+        return False
+    pair = (word[pos - 1] + word[pos]).lower().replace("ſ", "s")
+    return pair in LIGATURE_PAIRS
+
+
 def hyphenate_word(word):
     if len(word) < MIN_LEN:
         return word
@@ -159,7 +173,7 @@ def hyphenate_word(word):
     filtered = []
     last = -2
     for p in sorted(positions):
-        if p - last >= 2:
+        if p - last >= 2 and not _is_forbidden_split(word, p):
             filtered.append(p)
             last = p
     result = word
