@@ -34,7 +34,7 @@ from odf.style import (
     Style,
     TextProperties,
 )
-from odf.text import P
+from odf.text import P, Span
 
 SRC_DIR = "/Users/stay/mike/architecture/dictionary/out/bom_middle_english"
 OUT_PATH = os.path.join(SRC_DIR, "book_of_mormon.odt")
@@ -372,29 +372,50 @@ def build(out_path=OUT_PATH, chapter_placements=None):
     # on — the outer margin flips across recto/verso for mirrored layouts, so
     # this always lands in a page margin and never in the between-columns
     # gutter, satisfying the "inner or outer, never between the columns" rule).
-    chnum_frame_style = Style(name="ChapNumFrame", family="graphic")
-    chnum_frame_style.addElement(
-        GraphicProperties(
-            verticalpos="from-top",
-            verticalrel="paragraph",
-            horizontalpos="from-left",
-            horizontalrel="page",
-            wrap="run-through",
-            runthrough="foreground",
-            fill="none",
-            stroke="none",
+    # draw:textarea-horizontal-align is what LibreOffice actually respects
+    # for text inside a draw:text-box — the paragraph's own fo:text-align is
+    # ignored in that context. Two frame styles differ only in that attr:
+    # left-margin frames align text to the right (hugging the column),
+    # right-margin frames align to the left.
+    def make_chnum_frame_style(name, tha):
+        s = Style(name=name, family="graphic")
+        s.addElement(
+            GraphicProperties(
+                verticalpos="from-top",
+                verticalrel="paragraph",
+                horizontalpos="from-left",
+                horizontalrel="page",
+                wrap="run-through",
+                runthrough="foreground",
+                fill="none",
+                stroke="none",
+                textareahorizontalalign=tha,
+            )
         )
-    )
-    doc.automaticstyles.addElement(chnum_frame_style)
+        doc.automaticstyles.addElement(s)
+        return s
+
+    chnum_frame_left = make_chnum_frame_style("ChapNumFrameLeft", "right")
+    chnum_frame_right = make_chnum_frame_style("ChapNumFrameRight", "left")
 
     chnum_para_style = Style(name="ChapNumPara", family="paragraph")
     chnum_para_style.addElement(
-        TextProperties(fontname=FONT, fontsize="20pt", color="#b22222")
-    )
-    chnum_para_style.addElement(
-        ParagraphProperties(textalign="center", lineheight="100%")
+        ParagraphProperties(lineheight="100%")
     )
     doc.styles.addElement(chnum_para_style)
+
+    # Text-family style for the numeral glyphs themselves. Paragraph-level
+    # text-properties inside a draw:text-box aren't consistently applied by
+    # LibreOffice (color/font were being ignored), so we wrap the numeral in
+    # a text:span carrying the font/size/color explicitly.
+    #
+    # NOTE: this MUST live in automatic-styles (not styles) — LibreOffice
+    # ignores office:styles text properties on spans inside a draw:text-box.
+    chnum_span_style = Style(name="ChapNumSpan", family="text")
+    chnum_span_style.addElement(
+        TextProperties(fontname=FONT, fontsize="20pt", color="#b22222")
+    )
+    doc.automaticstyles.addElement(chnum_span_style)
 
     # Between-books colophon: red, centered, no dropcap.
     colophon_style = Style(name="Colophon", family="paragraph")
@@ -447,20 +468,24 @@ def build(out_path=OUT_PATH, chapter_placements=None):
             return
         p = P(stylename=style_name)
         if roman:
+            col = placement["column"] if placement else "left"
             if placement:
-                x = FRAME_X[(placement["parity"], placement["column"])]
+                x = FRAME_X[(placement["parity"], col)]
             else:
                 x = "0.50in"
+            style = chnum_frame_right if col == "right" else chnum_frame_left
             frame = Frame(
                 anchortype="paragraph",
                 width="0.9in",
                 height="0.35in",
                 x=x,
                 y="0in",
-                stylename=chnum_frame_style,
+                stylename=style,
             )
             box = TextBox()
-            box.addElement(P(stylename="ChapNumPara", text=roman))
+            para = P(stylename=chnum_para_style)
+            para.addElement(Span(stylename=chnum_span_style, text=roman))
+            box.addElement(para)
             frame.addElement(box)
             p.addElement(frame)
         p.addText(finalize(text))
