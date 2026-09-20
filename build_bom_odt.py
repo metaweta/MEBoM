@@ -364,7 +364,7 @@ def build(out_path=OUT_PATH, chapter_placements=None):
         s.addElement(pp)
         doc.styles.addElement(s)
 
-    make_dropcap_style("BookOpener", 6)
+    make_dropcap_style("BookOpener", 5)
     make_dropcap_style("ChapterOpener", 3)
 
     # Chapter number: a small text frame anchored to the paragraph, positioned
