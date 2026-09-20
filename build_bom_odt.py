@@ -477,6 +477,7 @@ def build(out_path=OUT_PATH, chapter_placements=None):
             fontname=FONT,
             fontsize=body_font_size,
             color="#b22222",
+            hyphenate="false",
         )
     )
     doc.styles.addElement(colophon_style)
@@ -561,8 +562,11 @@ def build(out_path=OUT_PATH, chapter_placements=None):
     }
 
     def emit_colophon_text(text):
-        text = hyphenate_text(text).translate(CHAR_TABLE)
-        doc.text.addElement(P(stylename="Colophon", text=text))
+        # Rubrics don't get hyphenated: no SHYs inserted, and the Colophon
+        # style has hyphenate="false" so LO's runtime hyphenator stays off.
+        doc.text.addElement(
+            P(stylename="Colophon", text=text.translate(CHAR_TABLE))
+        )
 
     def emit_colophon(prev_book, next_book):
         emit_colophon_text(
