@@ -291,6 +291,25 @@ def build():
     make_dropcap_style("BookOpener", 6)
     make_dropcap_style("ChapterOpener", 3)
 
+    # Between-books colophon: red, centered, no dropcap.
+    colophon_style = Style(name="Colophon", family="paragraph")
+    colophon_style.addElement(
+        ParagraphProperties(
+            textalign="center",
+            margintop="0in",
+            marginbottom="0in",
+            lineheight=line_height,
+        )
+    )
+    colophon_style.addElement(
+        TextProperties(
+            fontname=FONT,
+            fontsize=body_font_size,
+            color="#b22222",
+        )
+    )
+    doc.styles.addElement(colophon_style)
+
     def finalize(text):
         # Y (pronoun-I) → y except at the dropcap and its following letter;
         # also uppercase the letter immediately after the dropcap.
@@ -309,12 +328,39 @@ def build():
     if title_page:
         emit(title_page, "BookOpener")
 
+    # ME forms of the book names used in the between-books colophons.
+    BOOK_ME = {
+        "1 Nephi":         "firſte book of Nephi",
+        "2 Nephi":         "ſecounde book of Nephi",
+        "Jacob":           "book of Jacob",
+        "Enos":            "book of Enos",
+        "Jarom":           "book of Jarom",
+        "Omni":            "book of Omni",
+        "Words of Mormon": "wordis of Mormon",
+        "Mosiah":          "book of Moſie",
+        "Alma":            "book of Alma",
+        "Helaman":         "book of Helaman",
+        "3 Nephi":         "thridde book of Nephi",
+        "4 Nephi":         "fourthe book of Nephi",
+        "Mormon":          "book of Mormon",
+        "Ether":           "book of Ether",
+        "Moroni":          "book of Moroni",
+    }
+
+    def emit_colophon(prev_book, next_book):
+        text = (f"Here endith the {BOOK_ME[prev_book]}. "
+                f"Here bigynneth the {BOOK_ME[next_book]}.")
+        text = hyphenate_text(text).translate(CHAR_TABLE)
+        doc.text.addElement(P(stylename="Colophon", text=text))
+
     entries = read_index()
     current_book = None
 
     for fname, title in entries:
         book = book_of(title)
         first_of_book = book != current_book
+        if first_of_book and current_book is not None:
+            emit_colophon(current_book, book)
         current_book = book
 
         # Book intros are their own paragraph with a 3-line dropcap so the
