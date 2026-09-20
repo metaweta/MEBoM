@@ -419,9 +419,13 @@ def build(out_path=OUT_PATH, chapter_placements=None):
     doc.styles.addElement(overline_span_style)
 
     def add_body_text(p, text):
-        """Add body text to a paragraph, expanding the abbreviation 'iblþ'
-        into i + <overline>b</overline> + l + <overline>þ</overline>."""
-        parts = text.split("iblþ")
+        """Add body text to a paragraph, expanding the manuscript abbreviation
+        "ib̄lꝥ" (i + b-with-macron + l + thorn-with-stroke) into
+        i + <overline>b</overline> + l + <overline>þ</overline> — the ALOT
+        Gutenberg A font has no glyphs for U+0304 (combining macron) or
+        U+A765 (Latin thorn-with-stroke), so we draw the horizontal strokes
+        with markup on plain letters that the font renders natively."""
+        parts = text.split("ib̄lꝥ")
         for i, chunk in enumerate(parts):
             if chunk:
                 p.addText(chunk)
