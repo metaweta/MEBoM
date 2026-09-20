@@ -560,11 +560,19 @@ def build(out_path=OUT_PATH, chapter_placements=None):
         "Moroni":          "book of Moroni",
     }
 
-    def emit_colophon(prev_book, next_book):
-        text = (f"Here endith the {BOOK_ME[prev_book]}. "
-                f"Here bigynneth the {BOOK_ME[next_book]}.")
+    def emit_colophon_text(text):
         text = hyphenate_text(text).translate(CHAR_TABLE)
         doc.text.addElement(P(stylename="Colophon", text=text))
+
+    def emit_colophon(prev_book, next_book):
+        emit_colophon_text(
+            f"Here endith the {BOOK_ME[prev_book]}. "
+            f"Here bigynneth the {BOOK_ME[next_book]}."
+        )
+
+    # Opening incipit for the whole corpus, sitting between the title page
+    # and the 1 Nephi introduction.
+    emit_colophon_text("Here bigynneth the book of Nephi.")
 
     entries = read_index()
     current_book = None
@@ -607,6 +615,9 @@ def build(out_path=OUT_PATH, chapter_placements=None):
             roman=to_roman(chapter_of(title)),
             placement=chapter_placements.get(_chapter_key(fname)),
         )
+
+    # Closing explicit after the last chapter of Moroni.
+    emit_colophon_text("Here endith the book of Moroni.")
 
     doc.save(out_path)
     print(f"Wrote {out_path}")
