@@ -20,6 +20,7 @@ import re
 import subprocess
 
 import pyphen
+from odf.config import ConfigItem, ConfigItemSet
 from odf.draw import Frame, TextBox
 from odf.opendocument import OpenDocumentText
 from odf.style import (
@@ -283,6 +284,22 @@ def build(out_path=OUT_PATH, chapter_placements=None):
     left position that doesn't affect body flow (used in the probe pass)."""
     chapter_placements = chapter_placements or {}
     doc = OpenDocumentText()
+
+    # Force "printer-independent" layout so desktop LibreOffice and headless
+    # soffice --convert-to pdf agree on line breaks and pagination. Without
+    # this, screen metrics and printer metrics differ subtly, causing a
+    # chapter to land in different columns/pages between probe and viewer
+    # (which then puts marginal chapter numerals on the wrong side in the
+    # desktop view).
+    cs = ConfigItemSet(name="ooo:configuration-settings")
+    cs.addElement(
+        ConfigItem(
+            name="PrinterIndependentLayout",
+            type="string",
+            text="high-resolution",
+        )
+    )
+    doc.settings.addElement(cs)
 
     doc.fontfacedecls.addElement(
         FontFace(name=FONT, fontfamily=f'"{FONT}"')
