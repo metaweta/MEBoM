@@ -259,14 +259,15 @@ def chapter_opening_probe(fname):
     return text[1:30]
 
 
-def build(out_path=OUT_PATH, chapter_columns=None):
+def build(out_path=OUT_PATH, chapter_placements=None):
     """Build an ODT.
 
-    chapter_columns: optional dict {chapter_key -> 'left' | 'right'} telling
-    where each chapter's body actually starts (as observed from a probe
-    render). Chapters not in the mapping (or when the mapping is None) get
-    a default left-margin frame."""
-    chapter_columns = chapter_columns or {}
+    chapter_placements: optional dict
+        {chapter_key -> {"column": "left"|"right", "parity": "odd"|"even"}}
+    describing where each chapter's body actually starts (as observed from a
+    probe render). None (or missing entries) → the frame goes to a fixed
+    left position that doesn't affect body flow (used in the probe pass)."""
+    chapter_placements = chapter_placements or {}
     doc = OpenDocumentText()
 
     doc.fontfacedecls.addElement(
@@ -385,12 +386,6 @@ def build(out_path=OUT_PATH, chapter_columns=None):
         )
     )
     doc.automaticstyles.addElement(chnum_frame_style)
-    # Left-margin frame: 0.5" from page's left edge (frame extends 0.5–1.4").
-    # Right-margin frame: 9.6" from page's left edge (frame extends 9.6–10.5").
-    # Both use horizontalpos="from-left"/horizontalrel="page" so the offset
-    # is deterministic per page regardless of recto/verso mirroring.
-    FRAME_X_LEFT = "0.5in"
-    FRAME_X_RIGHT = "9.6in"
 
     chnum_para_style = Style(name="ChapNumPara", family="paragraph")
     chnum_para_style.addElement(
@@ -428,16 +423,34 @@ def build(out_path=OUT_PATH, chapter_columns=None):
             head = head[0] + head[1].upper()
         return head + tail
 
-    def emit(text, style_name, roman=None, column=None):
+    # Frame x-offset (from page's left edge) so the frame sits ~0.25" from
+    # the column boundary, regardless of which side / which page-orientation
+    # the chapter is on. Frame width is 0.9"; margins are inner=1.75"/outer=2".
+    #   recto/left  -> LEFT column,  INNER margin (0.00–1.75"): x = 0.60"
+    #   recto/right -> RIGHT column, OUTER margin (9.00–11.0"): x = 9.25"
+    #   verso/left  -> LEFT column,  OUTER margin (0.00–2.00"): x = 0.85"
+    #   verso/right -> RIGHT column, INNER margin (9.25–11.0"): x = 9.50"
+    FRAME_X = {
+        ("odd",  "left"):  "0.60in",
+        ("odd",  "right"): "9.25in",
+        ("even", "left"):  "0.85in",
+        ("even", "right"): "9.50in",
+    }
+
+    def emit(text, style_name, roman=None, placement=None):
         """Emit a paragraph. If roman is given, prepend a chapter-number
         frame anchored to the paragraph, positioned in the page margin on
-        the side matching `column` ('left' or 'right'). If column is None
-        the frame defaults to the left margin (used during the probe pass)."""
+        the side matching `placement` ({'column':..., 'parity':...}). If
+        placement is None (probe pass) the frame defaults to a fixed left
+        position that doesn't affect body flow."""
         if not text:
             return
         p = P(stylename=style_name)
         if roman:
-            x = FRAME_X_RIGHT if column == "right" else FRAME_X_LEFT
+            if placement:
+                x = FRAME_X[(placement["parity"], placement["column"])]
+            else:
+                x = "0.50in"
             frame = Frame(
                 anchortype="paragraph",
                 width="0.9in",
@@ -522,7 +535,7 @@ def build(out_path=OUT_PATH, chapter_columns=None):
             combined,
             style_name,
             roman=to_roman(chapter_of(title)),
-            column=chapter_columns.get(_chapter_key(fname)),
+            placement=chapter_placements.get(_chapter_key(fname)),
         )
 
     doc.save(out_path)
@@ -560,8 +573,9 @@ def _strip_noise(s):
 
 
 def probe_chapter_columns(pdf_path):
-    """Return {chapter_key -> 'left'|'right'} by looking at where each
-    chapter's opening text starts in the rendered PDF."""
+    """Return {chapter_key -> {'column':'left'|'right', 'parity':'odd'|'even'}}
+    by looking at where each chapter's opening text starts in the rendered
+    PDF. `parity` follows PDF page numbering (1 = odd = recto)."""
     from pypdf import PdfReader
     entries = read_index()
     openings = [
@@ -570,14 +584,12 @@ def probe_chapter_columns(pdf_path):
     ]
     result = {}
     reader = PdfReader(pdf_path)
-    for page in reader.pages:
+    for pgnum, page in enumerate(reader.pages, start=1):
         runs = []
         def visit(text, cm, tm, font_dict, font_size):
             if text:
                 runs.append((tm[4], tm[5], text))
         page.extract_text(visitor_text=visit)
-        # Char-by-char record with the X coord of each character's run so
-        # that once we find a probe substring we can look up where it started.
         clean_chars = []
         clean_x = []
         for x, _y, txt in runs:
@@ -593,7 +605,10 @@ def probe_chapter_columns(pdf_path):
             idx = clean_text.find(probe)
             if idx >= 0 and idx < len(clean_x):
                 x = clean_x[idx]
-                result[key] = "left" if x < COLUMN_SPLIT_PT else "right"
+                result[key] = {
+                    "column": "left" if x < COLUMN_SPLIT_PT else "right",
+                    "parity": "odd" if pgnum % 2 else "even",
+                }
     return result
 
 
@@ -603,19 +618,20 @@ def main():
     probe_odt = os.path.join(tmp_dir, "probe.odt")
 
     print("Pass 1: probe render...")
-    build(out_path=probe_odt, chapter_columns=None)
+    build(out_path=probe_odt, chapter_placements=None)
     probe_pdf = convert_to_pdf(probe_odt, tmp_dir)
 
-    print("Analyzing probe PDF for chapter columns...")
-    columns = probe_chapter_columns(probe_pdf)
-    print(f"  columns detected: {len(columns)} chapters "
-          f"(left={sum(1 for v in columns.values() if v=='left')}, "
-          f"right={sum(1 for v in columns.values() if v=='right')})")
+    print("Analyzing probe PDF for chapter placements...")
+    placements = probe_chapter_columns(probe_pdf)
+    left = sum(1 for v in placements.values() if v["column"] == "left")
+    right = sum(1 for v in placements.values() if v["column"] == "right")
+    print(f"  placements detected: {len(placements)} chapters "
+          f"(left={left}, right={right})")
     with open(os.path.join(tmp_dir, "columns.json"), "w") as f:
-        json.dump(columns, f, indent=2, sort_keys=True)
+        json.dump(placements, f, indent=2, sort_keys=True)
 
     print("Pass 2: final render...")
-    build(out_path=OUT_PATH, chapter_columns=columns)
+    build(out_path=OUT_PATH, chapter_placements=placements)
 
 
 if __name__ == "__main__":
