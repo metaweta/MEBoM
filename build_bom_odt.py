@@ -1,8 +1,23 @@
 #!/usr/bin/env python3
-"""Build a LibreOffice ODT of the Book of Mormon in Middle English."""
+"""Build a LibreOffice ODT of the Book of Mormon in Middle English.
 
+Runs a two-pass build so each chapter's Roman-numeral marginalia lands in
+whichever page margin is nearest its anchor:
+
+  1. Build a probe ODT with frames tentatively placed on the left, convert
+     to PDF, and inspect the layout to see which column each chapter's body
+     text actually starts in.
+  2. Rebuild the ODT with per-chapter frame positioning: left column ->
+     left margin (inner on recto, outer on verso); right column -> right
+     margin (outer on recto, inner on verso). Frames are transparent with
+     wrap=run-through, so the body flow of pass 1 and pass 2 is identical
+     and the pass-1 column reading remains valid for pass 2.
+"""
+
+import json
 import os
 import re
+import subprocess
 
 import pyphen
 from odf.draw import Frame, TextBox
@@ -213,7 +228,45 @@ def to_roman(n):
     return r
 
 
-def build():
+def _chapter_key(fname):
+    return fname[:-4]  # strip .txt
+
+
+def chapter_opening_probe(fname):
+    """First ~20 chars of the chapter paragraph's text as it will appear
+    in the rendered PDF (superscription prepended if any; SHY stripped;
+    Y→y transform applied to everything past position 2). Used to locate
+    the paragraph's start column during the probe pass."""
+    parts = []
+    super_path = os.path.join(SRC_DIR, fname[:-4] + "_super.txt")
+    if os.path.exists(super_path):
+        s = read_preamble_text(super_path)
+        if s:
+            parts.append(s)
+    chap = read_chapter_text(os.path.join(SRC_DIR, fname))
+    if chap:
+        parts.append(chap)
+    text = " ".join(parts)
+    # Apply Y→y everywhere except positions 0 and 1 (dropcap and next letter)
+    head, tail = text[:2], text[2:].replace("Y", "y")
+    if len(head) >= 2 and head[1].islower():
+        head = head[0] + head[1].upper()
+    text = head + tail
+    # Strip soft hyphens for matching against extracted PDF text; skip the
+    # first character because the dropcap letter is drawn in white Lombardic
+    # and pypdf doesn't include it in extract_text output.
+    text = text.replace(SHY, "")
+    return text[1:30]
+
+
+def build(out_path=OUT_PATH, chapter_columns=None):
+    """Build an ODT.
+
+    chapter_columns: optional dict {chapter_key -> 'left' | 'right'} telling
+    where each chapter's body actually starts (as observed from a probe
+    render). Chapters not in the mapping (or when the mapping is None) get
+    a default left-margin frame."""
+    chapter_columns = chapter_columns or {}
     doc = OpenDocumentText()
 
     doc.fontfacedecls.addElement(
@@ -332,6 +385,12 @@ def build():
         )
     )
     doc.automaticstyles.addElement(chnum_frame_style)
+    # Left-margin frame: 0.5" from page's left edge (frame extends 0.5–1.4").
+    # Right-margin frame: 9.6" from page's left edge (frame extends 9.6–10.5").
+    # Both use horizontalpos="from-left"/horizontalrel="page" so the offset
+    # is deterministic per page regardless of recto/verso mirroring.
+    FRAME_X_LEFT = "0.5in"
+    FRAME_X_RIGHT = "9.6in"
 
     chnum_para_style = Style(name="ChapNumPara", family="paragraph")
     chnum_para_style.addElement(
@@ -369,22 +428,21 @@ def build():
             head = head[0] + head[1].upper()
         return head + tail
 
-    def emit(text, style_name, roman=None):
+    def emit(text, style_name, roman=None, column=None):
         """Emit a paragraph. If roman is given, prepend a chapter-number
-        frame anchored to the paragraph (positioned outside the content area)."""
+        frame anchored to the paragraph, positioned in the page margin on
+        the side matching `column` ('left' or 'right'). If column is None
+        the frame defaults to the left margin (used during the probe pass)."""
         if not text:
             return
         p = P(stylename=style_name)
         if roman:
+            x = FRAME_X_RIGHT if column == "right" else FRAME_X_LEFT
             frame = Frame(
                 anchortype="paragraph",
                 width="0.9in",
                 height="0.35in",
-                # Positioned at 0.5" from the left of the page. On recto
-                # (odd) pages this is in the inner margin; on verso (even)
-                # pages this is in the outer margin. Either way it is a
-                # page margin, never the between-columns gutter.
-                x="0.5in",
+                x=x,
                 y="0in",
                 stylename=chnum_frame_style,
             )
@@ -460,11 +518,105 @@ def build():
 
         combined = " ".join(pieces)
         style_name = "BookOpener" if first_of_book else "ChapterOpener"
-        emit(combined, style_name, roman=to_roman(chapter_of(title)))
+        emit(
+            combined,
+            style_name,
+            roman=to_roman(chapter_of(title)),
+            column=chapter_columns.get(_chapter_key(fname)),
+        )
 
-    doc.save(OUT_PATH)
-    print(f"Wrote {OUT_PATH}")
+    doc.save(out_path)
+    print(f"Wrote {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Two-pass build: probe render -> analyze -> final render
+# ---------------------------------------------------------------------------
+
+SOFFICE = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+# Column boundary: the between-columns gutter falls around x = 5.375 in
+# from the page's left edge. Anything left of that starts in the left
+# column, anything right of it starts in the right column. Using 5 in
+# (360 pt) gives a comfortable margin against noise.
+COLUMN_SPLIT_PT = 360
+
+
+def convert_to_pdf(odt_path, out_dir):
+    subprocess.run(
+        [SOFFICE, "--headless", "--convert-to", "pdf",
+         "--outdir", out_dir, odt_path],
+        check=True,
+    )
+    return os.path.join(
+        out_dir,
+        os.path.splitext(os.path.basename(odt_path))[0] + ".pdf",
+    )
+
+
+def _strip_noise(s):
+    """Normalize text for cross-matching probe strings against pypdf
+    output: drop whitespace and dashes (PDF line-break hyphens)."""
+    return re.sub(r"[\s\-­]+", "", s)
+
+
+def probe_chapter_columns(pdf_path):
+    """Return {chapter_key -> 'left'|'right'} by looking at where each
+    chapter's opening text starts in the rendered PDF."""
+    from pypdf import PdfReader
+    entries = read_index()
+    openings = [
+        (_chapter_key(fn), _strip_noise(chapter_opening_probe(fn))[:15])
+        for fn, _ in entries
+    ]
+    result = {}
+    reader = PdfReader(pdf_path)
+    for page in reader.pages:
+        runs = []
+        def visit(text, cm, tm, font_dict, font_size):
+            if text:
+                runs.append((tm[4], tm[5], text))
+        page.extract_text(visitor_text=visit)
+        # Char-by-char record with the X coord of each character's run so
+        # that once we find a probe substring we can look up where it started.
+        clean_chars = []
+        clean_x = []
+        for x, _y, txt in runs:
+            for ch in txt:
+                if re.match(r"[\s\-­]", ch):
+                    continue
+                clean_chars.append(ch)
+                clean_x.append(x)
+        clean_text = "".join(clean_chars)
+        for key, probe in openings:
+            if key in result or not probe:
+                continue
+            idx = clean_text.find(probe)
+            if idx >= 0 and idx < len(clean_x):
+                x = clean_x[idx]
+                result[key] = "left" if x < COLUMN_SPLIT_PT else "right"
+    return result
+
+
+def main():
+    tmp_dir = os.path.join(SRC_DIR, ".probe")
+    os.makedirs(tmp_dir, exist_ok=True)
+    probe_odt = os.path.join(tmp_dir, "probe.odt")
+
+    print("Pass 1: probe render...")
+    build(out_path=probe_odt, chapter_columns=None)
+    probe_pdf = convert_to_pdf(probe_odt, tmp_dir)
+
+    print("Analyzing probe PDF for chapter columns...")
+    columns = probe_chapter_columns(probe_pdf)
+    print(f"  columns detected: {len(columns)} chapters "
+          f"(left={sum(1 for v in columns.values() if v=='left')}, "
+          f"right={sum(1 for v in columns.values() if v=='right')})")
+    with open(os.path.join(tmp_dir, "columns.json"), "w") as f:
+        json.dump(columns, f, indent=2, sort_keys=True)
+
+    print("Pass 2: final render...")
+    build(out_path=OUT_PATH, chapter_columns=columns)
 
 
 if __name__ == "__main__":
-    build()
+    main()
