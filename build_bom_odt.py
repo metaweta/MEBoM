@@ -14,9 +14,11 @@ whichever page margin is nearest its anchor:
      and the pass-1 column reading remains valid for pass 2.
 """
 
+import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 
 import pyphen
@@ -39,6 +41,8 @@ from odf.text import P, Span
 
 SRC_DIR = "/Users/stay/mike/architecture/dictionary/out/bom_middle_english"
 OUT_PATH = os.path.join(SRC_DIR, "book_of_mormon.odt")
+EDIT_COPY_PATH = os.path.join(SRC_DIR, "book_of_mormon.edit.odt")
+EDITS_PATH = os.path.join(SRC_DIR, "edits.jsonl")
 FONT = "ALOT Gutenberg A"
 DROPCAP_FONT = "Lombardic"
 
@@ -247,6 +251,71 @@ def _chapter_key(fname):
     return fname[:-4]  # strip .txt
 
 
+def slugify(s):
+    return re.sub(r"\W+", "_", s.lower()).strip("_")
+
+
+def load_edits():
+    """Read edits.jsonl and return {para_key -> edited_text}. Later entries
+    for the same key override earlier ones so that repeated --capture runs
+    win over stale versions."""
+    result = {}
+    if not os.path.exists(EDITS_PATH):
+        return result
+    with open(EDITS_PATH, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "key" in entry and "edited" in entry:
+                result[entry["key"]] = entry["edited"]
+    return result
+
+
+def extract_body_texts(odt_path):
+    """Return a list of body-text strings, one per top-level text:p in
+    office:text. Ignores any draw:frame subtrees (chapter-number frames,
+    etc.) so text extracted from `fresh` and `edited` ODTs is comparable
+    at the paragraph level."""
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    ns_text = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+    ns_office = "urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+    ns_draw = "urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
+
+    with zipfile.ZipFile(odt_path) as z:
+        root = ET.fromstring(z.read("content.xml"))
+    body = root.find(f"{{{ns_office}}}body")
+    office_text = body.find(f"{{{ns_office}}}text") if body is not None else None
+    if office_text is None:
+        return []
+
+    def flow(elem):
+        parts = []
+        if elem.text:
+            parts.append(elem.text)
+        for child in elem:
+            if child.tag == f"{{{ns_draw}}}frame":
+                if child.tail:
+                    parts.append(child.tail)
+                continue
+            parts.append(flow(child))
+            if child.tail:
+                parts.append(child.tail)
+        return "".join(parts)
+
+    texts = []
+    for child in office_text:
+        if child.tag == f"{{{ns_text}}}p":
+            texts.append(flow(child))
+    return texts
+
+
 def chapter_opening_probe(fname):
     """First ~20 chars of the chapter paragraph's text as it will appear
     in the rendered PDF (superscription prepended if any; SHY stripped;
@@ -274,15 +343,25 @@ def chapter_opening_probe(fname):
     return text[1:30]
 
 
-def build(out_path=OUT_PATH, chapter_placements=None):
+def build(out_path=OUT_PATH, chapter_placements=None, overrides=None,
+          record_keys=None):
     """Build an ODT.
 
     chapter_placements: optional dict
         {chapter_key -> {"column": "left"|"right", "parity": "odd"|"even"}}
     describing where each chapter's body actually starts (as observed from a
     probe render). None (or missing entries) → the frame goes to a fixed
-    left position that doesn't affect body flow (used in the probe pass)."""
+    left position that doesn't affect body flow (used in the probe pass).
+
+    overrides: optional dict {para_key -> edited_body_text} — any paragraph
+    whose key appears here has its text replaced with the edited version
+    verbatim (no hyphenation / Y-lowercasing / char-table applied), used to
+    apply hand edits captured via --capture.
+
+    record_keys: optional list; if provided, each paragraph's key is appended
+    to it in emit order (used by --capture)."""
     chapter_placements = chapter_placements or {}
+    overrides = overrides or {}
     doc = OpenDocumentText()
 
     # Force "printer-independent" layout so desktop LibreOffice and headless
@@ -521,14 +600,18 @@ def build(out_path=OUT_PATH, chapter_placements=None):
         ("even", "right"): "9.50in",
     }
 
-    def emit(text, style_name, roman=None, placement=None):
+    def emit(text, style_name, roman=None, placement=None, key=None):
         """Emit a paragraph. If roman is given, prepend a chapter-number
         frame anchored to the paragraph, positioned in the page margin on
         the side matching `placement` ({'column':..., 'parity':...}). If
         placement is None (probe pass) the frame defaults to a fixed left
-        position that doesn't affect body flow."""
+        position that doesn't affect body flow.
+
+        `key` identifies the paragraph for override / capture purposes."""
         if not text:
             return
+        if record_keys is not None and key is not None:
+            record_keys.append(key)
         p = P(stylename=style_name)
         if roman:
             col = placement["column"] if placement else "left"
@@ -551,13 +634,17 @@ def build(out_path=OUT_PATH, chapter_placements=None):
             box.addElement(para)
             frame.addElement(box)
             p.addElement(frame)
-        add_body_text(p, finalize(text))
+        if key is not None and key in overrides:
+            # Edited text is stored fully post-transformation; use verbatim.
+            add_body_text(p, overrides[key])
+        else:
+            add_body_text(p, finalize(text))
         doc.text.addElement(p)
 
     # Title page — its own leading paragraph, 6-line dropcap.
     title_page = read_preamble_text(os.path.join(SRC_DIR, "title_page.txt"))
     if title_page:
-        emit(title_page, "BookOpener")
+        emit(title_page, "BookOpener", key="title_page")
 
     # ME forms of the book names used in the between-books colophons.
     BOOK_ME = {
@@ -578,22 +665,24 @@ def build(out_path=OUT_PATH, chapter_placements=None):
         "Moroni":          "book of Moroni",
     }
 
-    def emit_colophon_text(text):
+    def emit_colophon_text(text, key):
         # Rubrics don't get hyphenated: no SHYs inserted, and the Colophon
         # style has hyphenate="false" so LO's runtime hyphenator stays off.
-        doc.text.addElement(
-            P(stylename="Colophon", text=text.translate(CHAR_TABLE))
-        )
+        if record_keys is not None:
+            record_keys.append(key)
+        body = overrides[key] if key in overrides else text.translate(CHAR_TABLE)
+        doc.text.addElement(P(stylename="Colophon", text=body))
 
     def emit_colophon(prev_book, next_book):
         emit_colophon_text(
             f"Here endith the {BOOK_ME[prev_book]}. "
-            f"Here bigynneth the {BOOK_ME[next_book]}."
+            f"Here bigynneth the {BOOK_ME[next_book]}.",
+            key=f"colophon_{slugify(prev_book)}_to_{slugify(next_book)}",
         )
 
     # Opening incipit for the whole corpus, sitting between the title page
     # and the 1 Nephi introduction.
-    emit_colophon_text("Here bigynneth the book of Nephi.")
+    emit_colophon_text("Here bigynneth the book of Nephi.", key="incipit")
 
     entries = read_index()
     current_book = None
@@ -613,7 +702,7 @@ def build(out_path=OUT_PATH, chapter_placements=None):
                 os.path.join(SRC_DIR, f"{book_prefix}_intro.txt")
             )
             if intro:
-                emit(intro, "ChapterOpener")
+                emit(intro, "ChapterOpener", key=f"{book_prefix}_intro")
 
         # Chapter superscriptions are absorbed into the chapter paragraph
         # (they already share the 3-line dropcap size, so merging is fine).
@@ -635,10 +724,11 @@ def build(out_path=OUT_PATH, chapter_placements=None):
             style_name,
             roman=to_roman(chapter_of(title)),
             placement=chapter_placements.get(_chapter_key(fname)),
+            key=_chapter_key(fname),
         )
 
     # Closing explicit after the last chapter of Moroni.
-    emit_colophon_text("Here endith the book of Moroni.")
+    emit_colophon_text("Here endith the book of Moroni.", key="explicit")
 
     doc.save(out_path)
     print(f"Wrote {out_path}")
@@ -722,13 +812,13 @@ def probe_chapter_columns(pdf_path):
     return result
 
 
-def main():
+def two_pass_build(overrides=None, record_keys=None):
     tmp_dir = os.path.join(SRC_DIR, ".probe")
     os.makedirs(tmp_dir, exist_ok=True)
     probe_odt = os.path.join(tmp_dir, "probe.odt")
 
     print("Pass 1: probe render...")
-    build(out_path=probe_odt, chapter_placements=None)
+    build(out_path=probe_odt, chapter_placements=None, overrides=overrides)
     probe_pdf = convert_to_pdf(probe_odt, tmp_dir)
 
     print("Analyzing probe PDF for chapter placements...")
@@ -741,7 +831,81 @@ def main():
         json.dump(placements, f, indent=2, sort_keys=True)
 
     print("Pass 2: final render...")
-    build(out_path=OUT_PATH, chapter_placements=placements)
+    build(out_path=OUT_PATH, chapter_placements=placements,
+          overrides=overrides, record_keys=record_keys)
+
+
+def capture_edits():
+    """Diff `book_of_mormon.edit.odt` against a fresh build and append any
+    body-text changes to `edits.jsonl`, keyed by paragraph identifier."""
+    if not os.path.exists(EDIT_COPY_PATH):
+        raise SystemExit(
+            f"No editable copy at {EDIT_COPY_PATH}. Run with --editable first."
+        )
+    edits = load_edits()  # already-captured edits should still apply in the
+                          # fresh build so we diff against the same baseline
+                          # the reader sees.
+    keys = []
+    two_pass_build(overrides=edits, record_keys=keys)
+    fresh_texts = extract_body_texts(OUT_PATH)
+    edit_texts = extract_body_texts(EDIT_COPY_PATH)
+    if len(fresh_texts) != len(edit_texts):
+        raise SystemExit(
+            f"Paragraph count differs: fresh={len(fresh_texts)}, "
+            f"edit={len(edit_texts)}. Edits captured only when the paragraph "
+            f"structure matches; do not add or delete paragraphs in the "
+            f"editable copy."
+        )
+    if len(fresh_texts) != len(keys):
+        print(
+            f"WARNING: {len(fresh_texts)} paragraphs extracted vs {len(keys)} "
+            f"keys recorded; falling back to positional keys."
+        )
+        keys = [f"para_{i}" for i in range(len(fresh_texts))]
+    new_entries = []
+    for key, fresh, edited in zip(keys, fresh_texts, edit_texts):
+        if fresh != edited:
+            new_entries.append(
+                {"key": key, "original": fresh, "edited": edited}
+            )
+    if not new_entries:
+        print("No new edits detected.")
+        return
+    with open(EDITS_PATH, "a", encoding="utf-8") as f:
+        for entry in new_entries:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    print(f"Appended {len(new_entries)} edit(s) to {EDITS_PATH}")
+    for entry in new_entries:
+        print(f"  [{entry['key']}]")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--editable", action="store_true",
+        help="After building, copy the ODT to book_of_mormon.edit.odt for "
+             "manual editing in LibreOffice.",
+    )
+    parser.add_argument(
+        "--capture", action="store_true",
+        help="Rebuild fresh, diff against book_of_mormon.edit.odt, and "
+             "append any body-text changes to edits.jsonl. Existing edits "
+             "are re-applied to the fresh build so newer edits stack.",
+    )
+    args = parser.parse_args()
+
+    if args.capture:
+        capture_edits()
+        return
+
+    edits = load_edits()
+    if edits:
+        print(f"Applying {len(edits)} edit(s) from {EDITS_PATH}")
+    two_pass_build(overrides=edits)
+
+    if args.editable:
+        shutil.copyfile(OUT_PATH, EDIT_COPY_PATH)
+        print(f"Copied editable version to {EDIT_COPY_PATH}")
 
 
 if __name__ == "__main__":
